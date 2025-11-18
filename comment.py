@@ -6,31 +6,33 @@ from urllib.parse import urlparse, parse_qs
 import requests
 from google import genai
 from google.genai import types
-from bs4 import BeautifulSoup 
+from bs4 import BeautifulSoup
 
 
-# 여기에 Gemini API 키 넣기
+# Put your Gemini API key here
 GEMINI_API_KEY = " "
 
-# 여기에 YouTube Data API v3 키 넣기
+# Put your YouTube Data API v3 key here
 YOUTUBE_API_KEY = " "
 
 GEMINI_MODEL = "gemini-2.5-flash"
-MAX_COMMENTS = 10                  # 맨 위 댓글 최대 개수
+MAX_COMMENTS = 10  # Max number of top-level comments
 
 
 def normalize_url(url: str) -> str:
     """
-    URL 중복 체크용 간단 노멀라이즈: 양끝 공백 제거 + 끝 슬래시 제거.
+    Simple URL normalization for duplicate checking:
+    trims whitespace and removes trailing slash.
     """
     return url.strip().rstrip("/")
 
 
-# 플랫폼 판별
+# Platform detection
 
 def detect_platform(url: str) -> str:
     """
-    URL 호스트를 보고 reddit / youtube / x / instagram / clien / dcinside / fmkorea / unknown 중 하나를 리턴.
+    Detect platform by URL host and return one of:
+    reddit / youtube / x / instagram / clien / dcinside / fmkorea / unknown.
     """
     host = urlparse(url).netloc.lower()
     if "reddit.com" in host:
@@ -50,13 +52,13 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 
-# Reddit: top-level 댓글만 수집
+# Reddit: fetch only top-level comments
 
 def fetch_comments_from_reddit(url: str, max_comments: int = MAX_COMMENTS):
     """
-    Reddit 쓰레드 URL에서 맨 위(top-level) 댓글만 최대 max_comments 개까지 가져온다.
-    - data[1]["data"]["children"] 에 있는 t1 만 사용
-    - 각 t1 의 'replies' 필드는 절대 타지 않는다 → 꼬리 댓글은 완전히 무시
+    Fetch up to max_comments top-level comments from a Reddit thread URL.
+    - Uses data[1]["data"]["children"] and only takes items with kind == "t1"
+    - Does NOT traverse the 'replies' field (no nested replies).
     """
     api_url = url
     if not api_url.endswith(".json"):
@@ -94,12 +96,12 @@ def fetch_comments_from_reddit(url: str, max_comments: int = MAX_COMMENTS):
     return top_level_comments
 
 
-# YouTube: top-level 댓글 수집
+# YouTube: fetch top-level comments
 
 def extract_youtube_video_id(url: str) -> str:
     """
-    여러 형태의 YouTube URL에서 videoId만 뽑아낸다.
-    지원:
+    Extract videoId from various YouTube URL formats.
+    Supported examples:
       - https://www.youtube.com/watch?v=VIDEO_ID
       - https://youtu.be/VIDEO_ID
       - https://www.youtube.com/shorts/VIDEO_ID
@@ -137,8 +139,8 @@ def extract_youtube_video_id(url: str) -> str:
 
 def fetch_comments_from_youtube(url: str, max_comments: int = MAX_COMMENTS):
     """
-    YouTube Data API v3를 사용해서 top-level 댓글만 최대 max_comments 개까지 가져온다.
-    - replies는 포함하지 않음 (commentThreads.list는 원래 top-level 기준)
+    Use YouTube Data API v3 to fetch up to max_comments top-level comments.
+    - Does not include replies (commentThreads.list is top-level based).
     """
     if not YOUTUBE_API_KEY or YOUTUBE_API_KEY == "YOUR_YOUTUBE_API_KEY_HERE":
         raise RuntimeError("Please set a valid YouTube Data API key in YOUTUBE_API_KEY at the top of the code.")
@@ -188,13 +190,14 @@ def fetch_comments_from_youtube(url: str, max_comments: int = MAX_COMMENTS):
     return comments
 
 
-# Clien: HTML 파싱으로 댓글 수집
+# Clien: fetch comments by HTML parsing
 
 def fetch_comments_from_clien(url: str, max_comments: int = MAX_COMMENTS):
     """
-    클리앙 글 URL에서 댓글 텍스트를 최대 max_comments 개까지 가져온다.
-    - clien.net -> www.clien.net 로 통일
-    - User-Agent 를 실제 브라우저와 비슷하게 설정
+    Fetch up to max_comments comments from a Clien post URL.
+    - Normalize clien.net -> www.clien.net
+    - Use a browser-like User-Agent
+    - Try multiple candidate CSS selectors as HTML structure may change.
     """
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
@@ -260,14 +263,14 @@ def fetch_comments_from_clien(url: str, max_comments: int = MAX_COMMENTS):
     return comments
 
 
-# DCInside: HTML 파싱으로 댓글 수집
+# DCInside: fetch comments by HTML parsing
 
 def fetch_comments_from_dcinside(url: str, max_comments: int = MAX_COMMENTS):
     """
-    DCInside 게시글 URL에서 댓글 텍스트를 최대 max_comments 개까지 가져온다.
-    - http -> https 통일
-    - User-Agent 를 실제 브라우저와 비슷하게 설정
-    - HTML 구조가 수시로 바뀔 수 있으므로 여러 candidate selector를 시도
+    Fetch up to max_comments comments from a DCInside post URL.
+    - Normalize http -> https
+    - Use a browser-like User-Agent
+    - Try multiple candidate CSS selectors as gallery HTML differs by board.
     """
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
@@ -295,7 +298,7 @@ def fetch_comments_from_dcinside(url: str, max_comments: int = MAX_COMMENTS):
     comments = []
     seen = set()
 
-    # DCInside는 갤러리마다 구조가 조금씩 달 수 있어서 후보 selector를 넓게 잡음
+    # DCInside gallery structure may vary, so we try multiple selectors.
     candidate_selectors = [
         "#comment_box .reply",
         "#comment_box .usertxt",
@@ -319,7 +322,7 @@ def fetch_comments_from_dcinside(url: str, max_comments: int = MAX_COMMENTS):
             if len(comments) >= max_comments:
                 return comments
 
-    # fallback: class 이름에 "cmt" 또는 "comment" 포함된 div들
+    # Fallback: div elements with class name including "cmt" or "comment"
     if not comments:
         for elem in soup.find_all("div", class_=lambda v: v and ("cmt" in v or "comment" in v)):
             text = elem.get_text(separator="\n", strip=True)
@@ -333,32 +336,32 @@ def fetch_comments_from_dcinside(url: str, max_comments: int = MAX_COMMENTS):
     return comments
 
 
-# FMKorea: HTML 파싱으로 댓글 수집
+# FMKorea: fetch comments by HTML parsing
 
 def fetch_comments_from_fmkorea(url: str, max_comments: int = MAX_COMMENTS):
     """
-    에펨코리아(fmkorea.com) 게시글 URL에서 댓글 텍스트를 최대 max_comments 개까지 가져온다.
-    - http -> https 통일
-    - /best/8520412622 같은 슬러그 URL을 XE 기본 형식
-      /index.php?mid=best&document_srl=8520412622 로 변환해서 요청
-    - User-Agent / Referer 를 실제 브라우저처럼 설정
-    - HTML 구조가 변동 가능하므로 여러 selector를 순차적으로 시도
+    Fetch up to max_comments comments from an FMKorea (fmkorea.com) post URL.
+    - Normalize http -> https
+    - Convert slug URL like /best/8520412622 to XE default:
+      /index.php?mid=best&document_srl=8520412622
+    - Use browser-like User-Agent and Referer
+    - Try multiple candidate CSS selectors as HTML structure may change.
     """
     # http -> https
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
 
-    # /best/8520412622 같은 형식을 index.php?mid=best&document_srl=8520412622 로 변환
+    # Convert /best/8520412622 to /index.php?mid=best&document_srl=8520412622
     parsed = urlparse(url)
     host = parsed.netloc
     path = parsed.path
 
     path_parts = path.strip("/").split("/")
-    # 예: ["best", "8520412622"]
+    # Example: ["best", "8520412622"]
     if len(path_parts) >= 2 and path_parts[-1].isdigit():
         board = path_parts[-2]
         doc_id = path_parts[-1]
-        # 기존 query 유지 + mid, document_srl 세팅
+        # Keep existing query, add mid and document_srl
         base_query = parse_qs(parsed.query)
         base_query["mid"] = [board]
         base_query["document_srl"] = [doc_id]
@@ -390,11 +393,11 @@ def fetch_comments_from_fmkorea(url: str, max_comments: int = MAX_COMMENTS):
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Network error during FMKorea request: {e}")
 
-    # 에펨이 커스텀 코드로 막는 경우(예: 430)
+    # FMKorea may use custom status (e.g., 430) for bot/anti-scraping
     if resp.status_code == 430:
         raise RuntimeError("FMKorea returned status 430 (likely bot protection / anti-scraping).")
 
-    # 다른 4xx/5xx 에러는 그대로 예외
+    # Other 4xx/5xx errors
     resp.raise_for_status()
 
     html = resp.text
@@ -403,7 +406,7 @@ def fetch_comments_from_fmkorea(url: str, max_comments: int = MAX_COMMENTS):
     comments = []
     seen = set()
 
-    # FMKorea는 XE 기반이라 댓글이 xe_content 안에 있는 경우가 많음
+    # FMKorea is XE-based; comments often live inside xe_content blocks
     candidate_selectors = [
         "#comment .xe_content",
         "#comment .xe_content p",
@@ -425,7 +428,7 @@ def fetch_comments_from_fmkorea(url: str, max_comments: int = MAX_COMMENTS):
             if len(comments) >= max_comments:
                 return comments
 
-    # fallback: class 이름에 "cmt" 또는 "comment" 포함된 요소들
+    # Fallback: elements whose class name includes "cmt" or "comment"
     if not comments:
         for elem in soup.find_all(class_=lambda v: v and ("cmt" in v or "comment" in v)):
             text = elem.get_text(separator="\n", strip=True)
@@ -439,21 +442,21 @@ def fetch_comments_from_fmkorea(url: str, max_comments: int = MAX_COMMENTS):
     return comments
 
 
-
-# 기타 플랫폼 (stub / TODO)
+# Other platforms (stubs / TODO)
 
 def fetch_comments_from_x(url: str, max_comments: int = MAX_COMMENTS):
-    raise NotImplementedError("X/Twitter 댓글 수집은 아직 구현되지 않았습니다. X API를 사용하세요.")
+    raise NotImplementedError("X/Twitter comment collection is not implemented yet. Please use X API directly.")
 
 
 def fetch_comments_from_instagram(url: str, max_comments: int = MAX_COMMENTS):
-    raise NotImplementedError("Instagram 댓글 수집은 아직 구현되지 않았습니다. Instagram Graph API를 사용하세요.")
+    raise NotImplementedError("Instagram comment collection is not implemented yet. Please use Instagram Graph API.")
 
 
 def fetch_comments(url: str, max_comments: int = MAX_COMMENTS):
     """
-    URL을 보고 플랫폼을 판단한 뒤, 해당 플랫폼용 fetcher를 호출한다.
-    지금은 Reddit / YouTube / Clien / DCInside / FMKorea 만 실제 구현.
+    Detect platform from URL and call the corresponding fetcher.
+    Implemented platforms:
+      - Reddit / YouTube / Clien / DCInside / FMKorea
     """
     platform = detect_platform(url)
     if platform == "reddit":
@@ -474,20 +477,23 @@ def fetch_comments(url: str, max_comments: int = MAX_COMMENTS):
         raise ValueError(f"Unsupported or unrecognized platform for URL: {url}")
 
 
-# Gemini로 댓글 분석
+# Analyze comments with Gemini
 
 def analyze_comments_with_gemini(comments, model: str = GEMINI_MODEL):
     """
-    comments: 문자열 리스트 (각 원소 = 한 댓글)
-    Gemini API를 사용해:
-      - 댓글별 키워드
-      - 댓글별 sentiment + 톤
-      - 한국어/영어 설명
-      - 전체 요약 / 전체 키워드 / 전체 감성
-    을 JSON 형태로 돌려준다.
+    Analyze a list of comment texts with Gemini.
+    For each comment, the model should produce:
+      - keywords
+      - sentiment + tone
+      - explanation in Korean and English
+    For the whole thread, the model should produce:
+      - overall sentiment
+      - Korean and English summaries
+      - top keywords
+    Returns the parsed JSON dictionary.
     """
     if not comments:
-        raise ValueError("분석할 댓글이 없습니다.")
+        raise ValueError("There are no comments to analyze.")
 
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
         raise RuntimeError("Please set a valid Gemini API key in GEMINI_API_KEY at the top of the code.")
@@ -500,51 +506,61 @@ def analyze_comments_with_gemini(comments, model: str = GEMINI_MODEL):
     ]
 
     prompt = f"""
-당신은 인터넷 댓글을 정밀하게 분석하는 AI 입니다.
-아래는 어떤 게시물에 달린 댓글 리스트입니다. 각 댓글에 대해:
+You are an AI specialized in fine-grained analysis of internet comments.
+Below is a list of comments posted under a specific content (e.g., a video, article, or forum thread).
 
-1) 주요 키워드 (3~7개 정도, 영어/한국어 섞여도 됨)
+For each comment, you must provide:
+
+1) keywords:
+   - 3–7 representative keywords (they may be in English or Korean, or mixed)
 2) sentiment:
-   - "positive", "negative", "mixed", "neutral" 중 하나
+   - exactly one of: "positive", "negative", "mixed", "neutral"
 3) tone:
-   - "sarcastic", "ironic", "angry", "disappointed", "supportive",
-     "humorous", "neutral" 등 몇 단어로 요약
+   - a short phrase describing tone, e.g.:
+     "sarcastic", "ironic", "angry", "disappointed", "supportive",
+     "humorous", "neutral", etc.
 4) sentiment_reason:
-   - 왜 그렇게 판단했는지 한국어로 짧게 설명
+   - a short explanation in **Korean** describing why you assigned that sentiment
 5) sentiment_reason_en:
-   - 4번의 내용을 영어로 다시 요약해서 설명
+   - a short explanation in **English** summarizing the same reasoning as (4)
 
-또한 전체 스레드 수준에서:
-- overall_sentiment: "positive" / "negative" / "mixed" / "neutral"
-- summary_ko: 전체 논조를 한국어로 요약 (3~4문장)
-- summary_en: 전체 논조를 영어로 요약 (3~4문장)
-- top_keywords: 전체 스레드에서 자주 등장하거나 중요한 키워드 (5~10개)
+At the overall thread level, you must also provide:
 
-입력으로 주어지는 JSON 형식의 comments를 분석해서,
-아래 JSON 스키마를 정확히 만족하는 문자열만 출력하세요.
+- overall_sentiment:
+  - exactly one of: "positive", "negative", "mixed", "neutral"
+- summary_ko:
+  - a Korean summary of the overall discussion and tone (about 3–4 sentences)
+- summary_en:
+  - an English summary of the overall discussion and tone (about 3–4 sentences)
+- top_keywords:
+  - 5–10 important or frequently appearing keywords across all comments
 
-필수 JSON 스키마:
+You are given the input comments as a JSON array.
+Analyze them and output **only** one JSON object as a string, exactly following the schema below.
+
+Required JSON schema:
+
 {{
   "per_comment": [
     {{
-      "index": 정수,
-      "text": 문자열,
+      "index": integer,
+      "text": string,
       "sentiment": "positive" | "negative" | "mixed" | "neutral",
-      "tone": 문자열,
-      "sentiment_reason": 문자열,
-      "sentiment_reason_en": 문자열,
-      "keywords": [ 문자열, ... ]
+      "tone": string,
+      "sentiment_reason": string,
+      "sentiment_reason_en": string,
+      "keywords": [ string, ... ]
     }}
   ],
   "overall": {{
     "overall_sentiment": "positive" | "negative" | "mixed" | "neutral",
-    "summary_ko": 문자열,
-    "summary_en": 문자열,
-    "top_keywords": [ 문자열, ... ]
+    "summary_ko": string,
+    "summary_en": string,
+    "top_keywords": [ string, ... ]
   }}
 }}
 
-여기 input comments JSON 이 있습니다:
+Input comments JSON:
 {json.dumps(comments_payload, ensure_ascii=False)}
 """
 
@@ -570,9 +586,13 @@ def analyze_comments_with_gemini(comments, model: str = GEMINI_MODEL):
     return result
 
 
-# 감성 카운트 계산
+# Sentiment counts
 
 def compute_sentiment_counts(result: dict):
+    """
+    Count how many comments fall into each sentiment label.
+    Returns (sentiment_counts_dict, total_count).
+    """
     per_comment = result.get("per_comment", [])
     sentiment_counts = {}
     for item in per_comment:
@@ -584,11 +604,11 @@ def compute_sentiment_counts(result: dict):
     return sentiment_counts, total
 
 
-# 결과 출력
+# Print detailed analysis result
 
 def print_analysis(result: dict):
     """
-    analyze_comments_with_gemini() 결과(JSON dict)를 콘솔에 보기 좋게 출력.
+    Pretty-print the result dictionary returned by analyze_comments_with_gemini().
     """
     per_comment = result.get("per_comment", [])
     overall = result.get("overall", {})
@@ -628,8 +648,8 @@ def print_analysis(result: dict):
 
         sentiment = item.get("sentiment")
         tone = item.get("tone")
-        reason_ko = item.get("sentiment_reason")      # 한국어 설명
-        reason_en = item.get("sentiment_reason_en")   # 영어 설명
+        reason_ko = item.get("sentiment_reason")      # Korean explanation
+        reason_en = item.get("sentiment_reason_en")   # English explanation
         keywords = item.get("keywords", [])
 
         print(f"\n[{idx}] {txt}")
@@ -640,28 +660,28 @@ def print_analysis(result: dict):
         print(f"  - keywords            : {keywords}")
 
 
-# 집계 갱신
+# Update aggregated stats for K/E groups
 
 def update_aggregates(aggregates, lang_group: str, result: dict, platform: str):
     """
-    aggregates: {"K": {...}, "E": {...}} 구조
-    lang_group: "K" 또는 "E"
+    Update aggregate statistics for 'K' or 'E' group
+    using the analysis result from a single URL.
     """
     counts, total = compute_sentiment_counts(result)
     group = aggregates[lang_group]
 
-    # sentiment 집계
+    # Aggregate sentiment counts
     for k, v in counts.items():
         group["sentiments"][k] = group["sentiments"].get(k, 0) + v
 
-    # 댓글 수 / URL 수
+    # Aggregate total comments and URLs
     group["comments"] += total
     group["url_count"] += 1
 
-    # 플랫폼별 URL 수
+    # Aggregate URL count per platform
     group["platforms"][platform] = group["platforms"].get(platform, 0) + 1
 
-    # keyword 집계
+    # Aggregate keyword counts
     per_comment = result.get("per_comment", [])
     for item in per_comment:
         kws = item.get("keywords", []) or []
@@ -674,9 +694,12 @@ def update_aggregates(aggregates, lang_group: str, result: dict, platform: str):
             group["keywords"][kw_str] = group["keywords"].get(kw_str, 0) + 1
 
 
-# 언어별 비교 숫자 요약
+# Print numeric summary for each language group
 
 def print_group_summary(label: str, data: dict):
+    """
+    Print numeric summary for one language group.
+    """
     sentiments = data["sentiments"]
     total = data["comments"]
     url_count = data["url_count"]
@@ -694,12 +717,13 @@ def print_group_summary(label: str, data: dict):
         print(f"  {key:8} : {count:4d} ({pct:5.1f}%)")
 
 
-# Gemini에게 언어 비교 맡기기 (3문장 한/영)
+# Ask Gemini for cross-language comparison (3 sentences in KO/EN)
 
 def analyze_language_comparison_with_gemini(aggregates):
     """
-    K/E 양쪽에 데이터가 있을 때, Gemini에게 언어별 차이를 요약하게 맡긴다.
-    summary_ko, summary_en 을 각각 정확히 3문장으로 생성하도록 요청한다.
+    When both K and E groups have data, ask Gemini to summarize
+    cross-language differences using aggregate statistics.
+    The model must produce summary_ko and summary_en, each with exactly 3 sentences.
     """
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
         print("\n[Warning] Gemini API key is not set. Skipping AI-based comparison.")
@@ -732,39 +756,43 @@ def analyze_language_comparison_with_gemini(aggregates):
     }
 
     prompt = f"""
-당신은 두 언어권(한국어 댓글 그룹 K, 영어권 댓글 그룹 E)의 인터넷 댓글 분석 결과를 비교하여, 
-연구 목적에 맞는 요약을 작성하는 전문가입니다.
+You are an expert who compares comment analysis results between two language groups:
+- K: Korean-language comment group
+- E: English-language comment group
 
-아래 JSON은 각 언어 그룹별 집계된 정보입니다:
+Below is aggregated JSON data for each language group:
 {json.dumps(summary_input, ensure_ascii=False)}
 
-K/E 각각에 대해 다음을 고려해 비교·요약하세요:
-- 전체 댓글 수, URL 수
-- sentiment 분포 (positive, negative, neutral, mixed)
-- 주요 키워드와 담론의 차이
-- 어떤 감성이 상대적으로 더 강한지
-- 수용자들이 무엇에 열광/비판/냉소/지지하는지
+Using this information, compare and summarize how the two groups differ in:
 
-출력 형식은 반드시 다음 JSON 객체 **하나**만 이어서 출력해야 합니다.
+- total number of comments and URLs
+- sentiment distributions (positive, negative, neutral, mixed)
+- major keywords and topics
+- which emotions are relatively stronger in each group
+- what each audience tends to praise, criticize, joke about, or support
+
+Your output must be **exactly one JSON object** with the following structure:
 
 {{
-  "summary_ko": "문장 3개로 구성된 한국어 요약...",
-  "summary_en": "Exactly 3 sentences English summary..."
+  "summary_ko": "Korean summary with exactly 3 sentences...",
+  "summary_en": "English summary with exactly 3 sentences..."
 }}
 
-조건:
+Constraints:
+
 1. summary_ko:
-   - 한국어 문장 **정확히 3개**로 구성합니다.
-   - 각 문장은 공손한 평서체로 끝나야 합니다. (예: '~합니다.', '~입니다.')
-   - 줄바꿈 없이 한 줄 문자열로 작성합니다.
-   - 예시 스타일: "한국어 댓글은 ~~한 경향을 보입니다. 영어권 댓글은 ~~한 반응이 두드러집니다. 전체적으로 두 그룹은 ~~한 점에서 차이를 보입니다."
+   - Must consist of **exactly 3 sentences in Korean**.
+   - Each sentence must end with polite declarative endings, such as "~합니다." or "~입니다.".
+   - Write it as a single-line string (no line breaks).
+   - Example style: "한국어 댓글은 ~~한 경향을 보입니다. 영어권 댓글은 ~~한 반응이 두드러집니다. 전체적으로 두 그룹은 ~~한 점에서 차이를 보입니다."
 
 2. summary_en:
-   - 영어 문장 **정확히 3개**로 구성합니다.
-   - 줄바꿈 없이 한 줄 문자열로 작성합니다.
-   - 예시 스타일: "Korean comments tend to emphasize ____. English comments show stronger ____ responses. Overall, the two language groups differ in how they frame ____."
+   - Must consist of **exactly 3 sentences in English**.
+   - Write it as a single-line string (no line breaks).
+   - Example style: "Korean comments tend to emphasize ____. English comments show stronger ____ responses. Overall, the two language groups differ in how they frame ____."
 
-3. JSON 이외의 다른 텍스트(설명, 마크다운, 주석 등)는 절대 출력하지 마세요.
+3. Do NOT output any text other than this single JSON object.
+   - No explanations, no markdown, no comments, no additional text.
 """
 
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -788,8 +816,8 @@ K/E 각각에 대해 다음을 고려해 비교·요약하세요:
 
 def print_comparison_summary(aggregates):
     """
-    세션 전체에서 K/E 그룹 감성 분포를 비교해 숫자 요약을 출력하고,
-    조건이 맞으면 Gemini에게 한/영 3문장 요약을 맡긴다.
+    Print numeric summaries for K/E groups and,
+    if there is enough data, call Gemini to produce 3-sentence KO/EN comparison.
     """
     print("\n================ Language Comparison Summary ================")
     print_group_summary("Korean (K group)", aggregates["K"])
@@ -802,7 +830,7 @@ def print_comparison_summary(aggregates):
 
     total_urls = k["url_count"] + e["url_count"]
 
-    # 서로 다른 언어 그룹이 모두 있고, 전체 URL 수가 2개 이상일 때만 AI 기반 비교 실행
+    # Require at least 1 URL per group and at least 2 URLs in total
     if total_urls >= 2 and k["url_count"] >= 1 and e["url_count"] >= 1 and k_total > 0 and e_total > 0:
         comp = analyze_language_comparison_with_gemini(aggregates)
         if comp:
@@ -822,13 +850,12 @@ def print_comparison_summary(aggregates):
         print("\n[Info] Not enough cross-language data for AI-based comparison (need at least 2 URLs with both K and E groups).")
 
 
-# top keywords 출력
+# Top keywords summary
 
 def print_top_keywords_summary(aggregates, top_n: int = 10):
     """
-    각 언어 그룹에서 전체 댓글 기준으로 많이 등장한 keyword 상위 N개 출력.
-    - Korean 그룹: K
-    - English 그룹: E
+    Print top-N keywords for each language group (K and E),
+    based on aggregated comment keyword frequencies.
     """
     print("\n================ Top Keywords Summary ================")
 
@@ -854,11 +881,11 @@ def print_top_keywords_summary(aggregates, top_n: int = 10):
         print("\nNo comment data available for any language group.")
 
 
-# 인터랙티브 입력
+# Interactive input helpers
 
 def ask_lang_group():
     """
-    첫 분석 때 K/E 선택을 받는다.
+    Ask user to choose the first language group: K or E.
     """
     while True:
         choice = input("Select language group: Korean or English (K/E): ").strip().upper()
@@ -869,8 +896,11 @@ def ask_lang_group():
 
 def ask_next_action(aggregates):
     """
-    분석 후에 T / K / E 중 무엇을 할지 묻는다.
-    현재까지 몇 개의 URL이 K/E 그룹으로 분석됐는지도 함께 보여준다.
+    After each analysis, ask user what to do next:
+      - T: terminate
+      - K: analyze a new URL and count it as Korean-group data
+      - E: analyze a new URL and count it as English-group data
+    Also shows how many URLs have been analyzed per group.
     """
 
     def format_platforms(group):
@@ -902,9 +932,16 @@ def ask_next_action(aggregates):
 
 def process_one(lang_group: str, aggregates, seen_urls, initial_url: str = None):
     """
-    한 번의 URL 분석을 처리한다.
-    URL이 잘못되었을 경우 에러로 종료하지 않고, 계속 다시 URL을 묻는다.
-    같은 URL을 두 번 넣으면 'Already existed url' 메시지를 띄우고 다시 입력받는다.
+    Process one URL analysis run.
+    - Detect platform
+    - Fetch comments
+    - Analyze with Gemini
+    - Print results
+    - Update aggregates
+
+    If the URL is invalid or fetching fails, it will ask for a new URL
+    instead of crashing.
+    It also prevents analyzing exactly the same URL more than once.
     """
     lang_label = "Korean (K)" if lang_group == "K" else "English (E)"
 
@@ -916,7 +953,7 @@ def process_one(lang_group: str, aggregates, seen_urls, initial_url: str = None)
 
         normalized = normalize_url(url)
 
-        # 중복 URL 체크
+        # Duplicate URL check
         if normalized in seen_urls:
             print("Already existed url")
             url = None
@@ -944,7 +981,7 @@ def process_one(lang_group: str, aggregates, seen_urls, initial_url: str = None)
             url = None
 
 
-# 분석 ui
+# Main interactive loop
 
 def main():
     parser = argparse.ArgumentParser(
@@ -977,7 +1014,7 @@ def main():
     seen_urls = set()
 
     try:
-        # 첫 분석
+        # First analysis
         lang_group = ask_lang_group()
         if args.url:
             print(f"Using URL from command line argument: {args.url}")
@@ -987,19 +1024,21 @@ def main():
 
         total_runs += 1
 
-        # 이후 반복
+        # Subsequent analyses
         while True:
             action = ask_next_action(aggregates)
 
             if action == "T":
+                # Print top keywords across all runs
                 print_top_keywords_summary(aggregates, top_n=10)
 
+                # If we have at least 2 runs, try cross-language comparison
                 if total_runs >= 2:
                     print_comparison_summary(aggregates)
                 print("\nExiting program.")
                 break
 
-            # action 이 K 또는 E 인 경우
+            # If action is K or E, run another analysis under that language group
             lang_group = action
             process_one(lang_group, aggregates, seen_urls)
             total_runs += 1
