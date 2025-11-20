@@ -3,6 +3,9 @@ import json
 import sys
 from urllib.parse import urlparse, parse_qs
 
+from pathlib import Path
+import time
+
 import requests
 from google import genai
 from google.genai import types
@@ -17,6 +20,84 @@ YOUTUBE_API_KEY = " "
 
 GEMINI_MODEL = "gemini-2.5-flash"
 MAX_COMMENTS = 10  # Max number of top-level comments
+
+
+# Methodology explanation (for methodology section)
+METHODOLOGY_EXPLANATION_KO = (
+    "본 연구의 감성 분석은 문맥 기반 자연어 처리가 가능한 대규모 언어 모델인 Google Gemini 2.5 Flash를 활용하여 수행되었습니다. "
+    "이는 단순히 긍정/부정 단어의 빈도를 세는 기존의 키워드 매칭 방식과 달리, 텍스트 전체의 의미론적 맥락과 화자의 의도를 종합적으로 평가합니다. "
+    "모델은 명시적인 어휘뿐만 아니라 반어법(Sarcasm), 은어, 인터넷 용어 등 미묘한 언어적 뉘앙스를 고려하여 댓글을 4가지 범주(긍정, 부정, 중립, 복합)로 분류했습니다.\n\n"
+    "긍정 (Positive): 대상에 대한 동의, 칭찬, 지지, 즐거움 또는 건설적인 피드백을 포함하는 경우.\n\n"
+    "부정 (Negative): 대상에 대한 반대, 비판, 분노, 실망감을 표출하거나 모욕적인 언어를 포함하는 경우.\n\n"
+    "중립 (Neutral): 강한 감정적 색채나 주관적 의견 없이 사실을 진술하거나 단순한 질문 및 관찰을 하는 경우.\n\n"
+    "복합 (Mixed): 칭찬과 비판이 공존하거나, 대상에 대해 양가적인 감정을 드러내는 등 상충되는 정서가 한 문장 내에 포함된 경우."
+)
+
+METHODOLOGY_EXPLANATION_EN = (
+    "The sentiment analysis was conducted using Google's Gemini 2.5 Flash, a large language model (LLM) capable of context-aware natural language processing. "
+    "Unlike traditional keyword-counting methods, this approach evaluates the semantic meaning and underlying intent of each comment. "
+    "The model classifies sentiments into four categories (Positive, Negative, Neutral, Mixed) by analyzing not only explicit vocabulary but also linguistic nuances such as sarcasm, irony, slang, and internet-specific terminology.\n\n"
+    "Positive: Comments expressing agreement, praise, support, enjoyment, or constructive feedback.\n\n"
+    "Negative: Comments expressing disagreement, criticism, anger, disappointment, or using derogatory language.\n\n"
+    "Neutral: Factual statements, questions, or observations devoid of strong emotional coloring or subjective opinion.\n\n"
+    "Mixed: Comments that contain conflicting emotions, such as combining praise with criticism or expressing ambivalence toward the subject."
+)
+
+
+class StdoutLogger:
+    """
+    Wrapper around sys.stdout that duplicates everything printed to stdout
+    into an internal buffer, so we can save the entire session log to a file.
+    """
+
+    def __init__(self, original_stream):
+        self.original = original_stream
+        self.buffer = []
+
+    def write(self, data):
+        # Store log
+        self.buffer.append(data)
+        # Also print to original stdout
+        self.original.write(data)
+
+    def flush(self):
+        self.original.flush()
+
+    # Some libraries may call these methods
+    def isatty(self):
+        if hasattr(self.original, "isatty"):
+            return self.original.isatty()
+        return False
+
+    def fileno(self):
+        if hasattr(self.original, "fileno"):
+            return self.original.fileno()
+        return 1
+
+
+def get_result_file_path():
+    """
+    Decide where to save result.txt.
+
+    - Ask the user for a directory path (or Enter for current dir).
+    - Create the directory if needed and return <directory>/result.txt.
+    """
+    while True:
+        base = input(
+            "Enter directory path to save result.txt (press Enter for current directory): "
+        ).strip()
+        if not base:
+            directory = Path.cwd()
+        else:
+            directory = Path(base).expanduser()
+
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            result_path = directory / "result.txt"
+            return result_path
+        except Exception as e:
+            print(f"Invalid directory or cannot create it: {e}")
+            # Ask again
 
 
 def normalize_url(url: str) -> str:
@@ -353,7 +434,6 @@ def fetch_comments_from_fmkorea(url: str, max_comments: int = MAX_COMMENTS):
 
     # Convert /best/8520412622 to /index.php?mid=best&document_srl=8520412622
     parsed = urlparse(url)
-    host = parsed.netloc
     path = parsed.path
 
     path_parts = path.strip("/").split("/")
@@ -565,25 +645,43 @@ Input comments JSON:
 """
 
     client = genai.Client(api_key=GEMINI_API_KEY)
+    config = types.GenerateContentConfig(response_mime_type="application/json")
 
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json"
-    )
+    # Retry wrapper for transient 503/UNAVAILABLE errors
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config,
+            )
+            # Try JSON parsing
+            try:
+                result = json.loads(response.text)
+                return result
+            except json.JSONDecodeError:
+                print(
+                    "Warning: Failed to parse model response as JSON. Printing raw text.",
+                    file=sys.stderr,
+                )
+                print(response.text, file=sys.stderr)
+                # Do not retry on parse error; treat as fatal
+                raise
 
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=config,
-    )
+        except Exception as e:
+            msg = str(e)
+            if "503" in msg or "UNAVAILABLE" in msg:
+                print(f"[Warning] Gemini overloaded, retrying... ({attempt+1}/3)")
+                last_err = e
+                # Wait 3s, 6s, 9s
+                time.sleep(3 * (attempt + 1))
+                continue
+            # Other errors are raised immediately
+            raise
 
-    try:
-        result = json.loads(response.text)
-    except json.JSONDecodeError:
-        print("Warning: Failed to parse model response as JSON. Printing raw text.", file=sys.stderr)
-        print(response.text)
-        raise
-
-    return result
+    # After 3 attempts, fail
+    raise RuntimeError(f"Gemini API still unavailable after retries: {last_err}")
 
 
 # Sentiment counts
@@ -640,6 +738,11 @@ def print_analysis(result: dict):
     print(f"- summary_ko      : {overall.get('summary_ko')}")
     print(f"- summary_en      : {overall.get('summary_en')}")
     print(f"- top_keywords    : {overall.get('top_keywords')}")
+
+    # Methodology explanation in both Korean and English (for thesis/method section)
+    print("\n=== Sentiment Classification Methodology ===")
+    print(f"- methodology_ko : {METHODOLOGY_EXPLANATION_KO}")
+    print(f"- methodology_en : {METHODOLOGY_EXPLANATION_EN}")
 
     print("\n=== Per-Comment Analysis ===")
     for item in per_comment:
@@ -941,7 +1044,8 @@ def process_one(lang_group: str, aggregates, seen_urls, initial_url: str = None)
 
     If the URL is invalid or fetching fails, it will ask for a new URL
     instead of crashing.
-    It also prevents analyzing exactly the same URL more than once.
+    It also prevents analyzing exactly the same URL more than once
+    within a single run.
     """
     lang_label = "Korean (K)" if lang_group == "K" else "English (E)"
 
@@ -953,7 +1057,7 @@ def process_one(lang_group: str, aggregates, seen_urls, initial_url: str = None)
 
         normalized = normalize_url(url)
 
-        # Duplicate URL check
+        # Duplicate URL check for current run
         if normalized in seen_urls:
             print("Already existed url")
             url = None
@@ -981,6 +1085,20 @@ def process_one(lang_group: str, aggregates, seen_urls, initial_url: str = None)
             url = None
 
 
+def _filter_prompt_lines(log_text: str) -> str:
+    """
+    Remove the directory prompt line from the saved log text,
+    so it does not appear in result.txt.
+    """
+    lines = log_text.splitlines(keepends=True)
+    filtered = []
+    for line in lines:
+        if line.startswith("Enter directory path to save result.txt"):
+            continue
+        filtered.append(line)
+    return "".join(filtered)
+
+
 # Main interactive loop
 
 def main():
@@ -993,6 +1111,11 @@ def main():
         help="First URL to analyze (optional)"
     )
     args = parser.parse_args()
+
+    # Set up stdout logger so we can save the entire console log at the end
+    original_stdout = sys.stdout
+    logger = StdoutLogger(original_stdout)
+    sys.stdout = logger
 
     aggregates = {
         "K": {
@@ -1035,7 +1158,36 @@ def main():
                 # If we have at least 2 runs, try cross-language comparison
                 if total_runs >= 2:
                     print_comparison_summary(aggregates)
-                print("\nExiting program.")
+
+                print("\nExiting program.\n")
+
+                # Save all logs to result.txt ONLY when user chose T
+                try:
+                    result_path = get_result_file_path()
+                    log_text = "".join(logger.buffer)
+                    log_text = _filter_prompt_lines(log_text)
+
+                    if not log_text.endswith("\n"):
+                        log_text += "\n"
+
+                    # Check whether this is the first time writing to this file
+                    first_time = (not result_path.exists()) or (result_path.stat().st_size == 0)
+
+                    with result_path.open("a", encoding="utf-8") as f:
+                        if first_time:
+                            # 1st line: save path + one blank line
+                            f.write(f"Saved log to: {result_path}\n\n")
+                            # Then methodology explanations (KO + EN)
+                            f.write(METHODOLOGY_EXPLANATION_KO + "\n\n")
+                            f.write(METHODOLOGY_EXPLANATION_EN + "\n\n")
+                        # After that, append this session log
+                        f.write(log_text)
+
+                    # Notify user on console (this is not captured into the saved log snapshot)
+                    original_stdout.write(f"\n[Info] Saved log to: {result_path}\n")
+                except Exception as save_err:
+                    original_stdout.write(f"\n[Warning] Failed to save log file: {save_err}\n")
+
                 break
 
             # If action is K or E, run another analysis under that language group
@@ -1044,8 +1196,13 @@ def main():
             total_runs += 1
 
     except Exception as e:
+        # On any error / forced stop, do NOT save logs automatically
+        sys.stdout = original_stdout
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        # Restore stdout no matter what
+        sys.stdout = original_stdout
 
 
 if __name__ == "__main__":
